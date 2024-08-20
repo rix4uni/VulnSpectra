@@ -12,10 +12,15 @@ import (
 
 func main() {
     // Define command-line flags for directory and file extensions
-    dirPtr := flag.String("filesystem", ".", "Directory to scan")
+    dirPtr := flag.String("filesystem", ".", "Directory to scan") // Default to current directory
     extPtr := flag.String("ext", "", "Comma-separated list of file extensions to include (e.g., php,java)")
 
     flag.Parse()
+
+    // Check if the directory is provided as an argument
+    if flag.NArg() > 0 {
+        *dirPtr = flag.Arg(0) // Override the default with the provided directory
+    }
 
     // Define regex patterns and their associated bug types
     patterns := map[string]string{
