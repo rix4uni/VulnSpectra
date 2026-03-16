@@ -58,7 +58,7 @@ Usage of VulnSpectra:
 
 ## Examples
 
-```bash
+```console
 # Basic scan of current directory
 VulnSpectra
 
