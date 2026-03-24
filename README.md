@@ -9,6 +9,8 @@ VulnSpectra is an advanced static security analysis tool that performs taint ana
 - **Severity Classification**: Categorizes issues as Info, Warning, or Critical
 - **Sanitizer Detection**: Recognizes proper sanitization functions that remove taint
 - **Multi-Language Support**: Scans PHP, JS, Java, Python, and Go files
+- **ZIP Archive Support**: Auto-extract and scan ZIP files
+- **URL Download**: Download and scan plugins directly from URLs
 
 ## Detected Vulnerability Types
 
@@ -31,8 +33,8 @@ go install github.com/rix4uni/VulnSpectra@latest
 
 **Pre-built Binaries:**
 ```
-wget https://github.com/rix4uni/VulnSpectra/releases/download/v0.0.1/VulnSpectra-linux-amd64-0.0.1.tgz
-tar -xvzf VulnSpectra-linux-amd64-0.0.1.tgz
+wget https://github.com/rix4uni/VulnSpectra/releases/download/v0.0.2/VulnSpectra-linux-amd64-0.0.2.tgz
+tar -xvzf VulnSpectra-linux-amd64-0.0.2.tgz
 mv VulnSpectra ~/go/bin/
 ```
 
@@ -48,7 +50,7 @@ cd VulnSpectra; go install
 Usage of VulnSpectra:
   -c, --confidence string         Minimum confidence level (Low, Medium, High, Critical) (default "Medium")
   -e, --ext string                Comma-separated file extensions to scan (default "php,js,java,py,go")
-  -f, --filesystem string         Directory to scan (default ".")
+  -f, --filesystem string         Directory, ZIP file, or URL to scan (default ".")
   -i, --ignore-vulncheck string   Ignore specific vulnerability types (e.g., XSS, SQLI, LFI, RCE)
   -o, --output string             Output report file (optional)
       --silent                    Silent mode.
@@ -64,6 +66,12 @@ VulnSpectra
 
 # Scan specific directory with all file types
 VulnSpectra -f /path/to/code -e php,js,java
+
+# Scan a ZIP file (auto-extracts to temp directory)
+VulnSpectra -f /path/to/plugin.zip
+
+# Download and scan from URL (WordPress plugin example)
+VulnSpectra -f https://downloads.wordpress.org/plugin/woocommerce.10.6.1.zip
 
 # High confidence findings only
 VulnSpectra -c High

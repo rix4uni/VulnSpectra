@@ -1,12 +1,16 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/spf13/pflag"
 
@@ -194,14 +198,15 @@ func NewTaintAnalyzer() *TaintAnalyzer {
 					regexp.MustCompile(`(?i)\$_(FILES|ENV|SESSION)\s*\[`),
 				},
 				SinkPatterns: []*regexp.Regexp{
-					regexp.MustCompile(`(?i)echo\s+[^;]*\$`),
-					regexp.MustCompile(`(?i)print\s+[^;]*\$`),
-					regexp.MustCompile(`(?i)printf\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)sprintf\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)print_r\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)var_dump\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)die\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)exit\s*\([^)]+\$`),
+					// Match echo/print statements - require they output a variable
+					// Pattern: echo followed by whitespace, then optional formatting, then $
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])echo\s+(?:\(?[^;\"']*\)?\s*\.\s*)*\$[a-zA-Z_]`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])print\s+(?:\(?[^;\"']*\)?\s*\.\s*)*\$[a-zA-Z_]`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])printf\s*\([^;\"']*\$[a-zA-Z_]`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])print_r\s*\([^;\"']*\$[a-zA-Z_]`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])var_dump\s*\([^;\"']*\$[a-zA-Z_]`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])die\s*\([^;\"']*\$[a-zA-Z_]`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])exit\s*\([^;\"']*\$[a-zA-Z_]`),
 					regexp.MustCompile(`(?i)\.innerHTML\s*=`),
 					regexp.MustCompile(`(?i)document\.write\s*\(`),
 					regexp.MustCompile(`(?i)\.html\s*\(`),
@@ -218,7 +223,11 @@ func NewTaintAnalyzer() *TaintAnalyzer {
 					// WordPress/Laravel/CMS escapes (from Semgrep)
 					regexp.MustCompile(`(?i)esc_html\s*\(`),
 					regexp.MustCompile(`(?i)esc_attr\s*\(`),
+					regexp.MustCompile(`(?i)esc_url\s*\(`),
+					regexp.MustCompile(`(?i)esc_textarea\s*\(`),
+					regexp.MustCompile(`(?i)esc_js\s*\(`),
 					regexp.MustCompile(`(?i)wp_kses\s*\(`),
+					regexp.MustCompile(`(?i)wp_kses_post\s*\(`),
 					regexp.MustCompile(`(?i)e\s*\(`),
 					regexp.MustCompile(`(?i)twig_escape_filter\s*\(`),
 					regexp.MustCompile(`(?i)xss_clean\s*\(`),
@@ -227,6 +236,12 @@ func NewTaintAnalyzer() *TaintAnalyzer {
 					regexp.MustCompile(`(?i)Xss::filter\s*\(`),
 					regexp.MustCompile(`(?i)escapeHtml\s*\(`),
 					regexp.MustCompile(`(?i)escapeHtmlAttr\s*\(`),
+					// Type casting sanitizers
+					regexp.MustCompile(`(?i)\(int\)\s*\$`),
+					regexp.MustCompile(`(?i)\(float\)\s*\$`),
+					regexp.MustCompile(`(?i)\(string\)\s*\$`),
+					regexp.MustCompile(`(?i)\(bool\)\s*\$`),
+					regexp.MustCompile(`(?i)\(array\)\s*\$`),
 				},
 				SafeContextPatterns: []*regexp.Regexp{
 					regexp.MustCompile(`JSON\.stringify\s*\([^)]+\$`),
@@ -244,15 +259,15 @@ func NewTaintAnalyzer() *TaintAnalyzer {
 					regexp.MustCompile(`(?i)\$_SERVER\s*\[`),
 				},
 				SinkPatterns: []*regexp.Regexp{
-					regexp.MustCompile(`(?i)file_get_contents\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)fopen\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)curl_init\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)curl_setopt.*CURLOPT_URL`),
-					regexp.MustCompile(`(?i)fsockopen\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)socket_connect\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)get_headers\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)get_meta_tags\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)simplexml_load_file\s*\([^)]+\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])file_get_contents\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])fopen\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])curl_init\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])curl_setopt.*CURLOPT_URL`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])fsockopen\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])socket_connect\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])get_headers\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])get_meta_tags\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])simplexml_load_file\s*\([^("']*\$`),
 				},
 				SanitizerPatterns: []*regexp.Regexp{
 					regexp.MustCompile(`(?i)filter_var\s*\([^)]*FILTER_VALIDATE_URL`),
@@ -273,14 +288,14 @@ func NewTaintAnalyzer() *TaintAnalyzer {
 					regexp.MustCompile(`(?i)\$_COOKIE\s*\[`),
 				},
 				SinkPatterns: []*regexp.Regexp{
-					regexp.MustCompile(`(?i)file\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)file_exists\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)is_file\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)is_dir\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)unlink\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)copy\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)rename\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)move_uploaded_file\s*\([^)]+\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])file\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])file_exists\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])is_file\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])is_dir\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])unlink\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])copy\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])rename\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])move_uploaded_file\s*\([^("']*\$`),
 				},
 				SanitizerPatterns: []*regexp.Regexp{
 					regexp.MustCompile(`(?i)basename\s*\(`),
@@ -297,15 +312,15 @@ func NewTaintAnalyzer() *TaintAnalyzer {
 				SourcePatterns: []*regexp.Regexp{
 					regexp.MustCompile(`(?i)\$_GET\s*\[`),
 					regexp.MustCompile(`(?i)\$_POST\s*\[`),
-					regexp.MustCompile(`(?i)file_get_contents\s*\(['"]php://input['"]\s*\)`),
+					regexp.MustCompile(`(?i)file_get_contents\s*\(\s*['"]php://input['"]\s*\)`),
 					regexp.MustCompile(`(?i)\$HTTP_RAW_POST_DATA`),
 				},
 				SinkPatterns: []*regexp.Regexp{
-					regexp.MustCompile(`(?i)simplexml_load_string\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)simplexml_load_file\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)DOMDocument->loadXML\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)xml_parse\s*\([^)]+\$`),
-					regexp.MustCompile(`(?i)xml_parser_create`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])simplexml_load_string\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])simplexml_load_file\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])DOMDocument->loadXML\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])xml_parse\s*\([^("']*\$`),
+					regexp.MustCompile(`(?i)(?:^|[\s;{}])xml_parser_create`),
 				},
 				SanitizerPatterns: []*regexp.Regexp{
 					regexp.MustCompile(`(?i)libxml_disable_entity_loader\s*\(\s*true`),
@@ -576,11 +591,11 @@ func (ta *TaintAnalyzer) PrintResults() {
 
 	// Print findings
 	for i, finding := range ta.findings {
-		severityIcon := "ℹ"
+		severityIcon := "ℹ "
 		if finding.Severity == CriticalSev {
-			severityIcon = "🚨"
+			severityIcon = "🚨 "
 		} else if finding.Severity == Warning {
-			severityIcon = "⚠"
+			severityIcon = "⚠ "
 		}
 
 		fmt.Printf("\n%s FINDING #%d: %s [%s Confidence]\n", severityIcon, i+1, finding.BugType, finding.Confidence)
@@ -620,6 +635,96 @@ func (ta *TaintAnalyzer) SaveResultsToFile(filename string) error {
 	}
 
 	return writer.Flush()
+}
+
+// isURL checks if the path is a URL
+func isURL(path string) bool {
+	return strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://")
+}
+
+// isZipFile checks if the path is a ZIP file
+func isZipFile(path string) bool {
+	return strings.ToLower(filepath.Ext(path)) == ".zip"
+}
+
+// downloadFile downloads a file from URL to destination
+func downloadFile(url, destPath string) error {
+	client := &http.Client{
+		Timeout: 120 * time.Second,
+	}
+	
+	resp, err := client.Get(url)
+	if err != nil {
+		return fmt.Errorf("failed to download: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed with status: %d", resp.StatusCode)
+	}
+	
+	out, err := os.Create(destPath)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %v", err)
+	}
+	defer out.Close()
+	
+	_, err = io.Copy(out, resp.Body)
+	return err
+}
+
+// extractZip extracts a ZIP file to the destination directory
+func extractZip(zipPath, destDir string) error {
+	reader, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return fmt.Errorf("failed to open zip: %v", err)
+	}
+	defer reader.Close()
+	
+	for _, file := range reader.File {
+		path := filepath.Join(destDir, file.Name)
+		
+		// Prevent zip slip vulnerability
+		if !strings.HasPrefix(path, filepath.Clean(destDir)+string(os.PathSeparator)) {
+			continue
+		}
+		
+		if file.FileInfo().IsDir() {
+			os.MkdirAll(path, file.Mode())
+			continue
+		}
+		
+		if err := os.MkdirAll(filepath.Dir(path), os.ModePerm); err != nil {
+			return err
+		}
+		
+		outFile, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.Mode())
+		if err != nil {
+			return err
+		}
+		
+		rc, err := file.Open()
+		if err != nil {
+			outFile.Close()
+			return err
+		}
+		
+		_, err = io.Copy(outFile, rc)
+		outFile.Close()
+		rc.Close()
+		
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// cleanupTemp removes temporary directory and files
+func cleanupTemp(tempDir string) {
+	if tempDir != "" && strings.HasPrefix(tempDir, os.TempDir()) {
+		os.RemoveAll(tempDir)
+	}
 }
 
 func main() {
@@ -680,20 +785,93 @@ func main() {
 	// Create analyzer
 	analyzer := NewTaintAnalyzer()
 
-	fmt.Printf("🔍 VulnSpectra - Advanced Taint Analysis Engine\n")
-	fmt.Printf("   Scanning: %s\n", *filesystem)
-	fmt.Printf("   Extensions: %s\n", *extensions)
-	fmt.Printf("   Min Confidence: %s\n", *minConfidence)
-	if *vulnCheck != "" {
-		fmt.Printf("   Vuln Filter: %s\n", *vulnCheck)
+	// Handle URL and ZIP preprocessing
+	scanPath := *filesystem
+	var tempDir string
+	localZipPath := ""
+	scanMode := "Directory"
+
+	// Check if input is a URL
+	if isURL(scanPath) {
+		scanMode = "URL + ZIP"
+		// Create temp directory
+		var err error
+		tempDir, err = os.MkdirTemp("", "vulnspectra-*")
+		if err != nil {
+			fmt.Printf("Error creating temp directory: %v\n", err)
+			os.Exit(1)
+		}
+		defer cleanupTemp(tempDir)
+		
+		// Download file
+		zipName := filepath.Base(scanPath)
+		if zipName == "" || zipName == "/" {
+			zipName = "download.zip"
+		}
+		localZipPath = filepath.Join(tempDir, zipName)
+		
+		if !*silent {
+			fmt.Printf("📥 Downloading: %s\n", scanPath)
+		}
+		if err := downloadFile(scanPath, localZipPath); err != nil {
+			fmt.Printf("Error downloading file: %v\n", err)
+			os.Exit(1)
+		}
+		if !*silent {
+			fmt.Printf("✓ Downloaded to: %s\n", localZipPath)
+		}
+		scanPath = localZipPath
 	}
-	if *ignoreVulnCheck != "" {
-		fmt.Printf("   Ignore Vuln: %s\n", *ignoreVulnCheck)
+
+	// Check if input is a ZIP file
+	if isZipFile(scanPath) {
+		if scanMode == "Directory" {
+			scanMode = "ZIP Archive"
+		}
+		// Create temp directory if not already created
+		if tempDir == "" {
+			var err error
+			tempDir, err = os.MkdirTemp("", "vulnspectra-*")
+			if err != nil {
+				fmt.Printf("Error creating temp directory: %v\n", err)
+				os.Exit(1)
+			}
+			defer cleanupTemp(tempDir)
+		}
+		
+		// Extract ZIP
+		if !*silent {
+			fmt.Printf("📦 Extracting: %s\n", scanPath)
+		}
+		if err := extractZip(scanPath, tempDir); err != nil {
+			fmt.Printf("Error extracting ZIP: %v\n", err)
+			os.Exit(1)
+		}
+		if !*silent {
+			fmt.Printf("✓ Extracted to: %s\n", tempDir)
+		}
+		scanPath = tempDir
 	}
-	fmt.Println()
+
+	if !*silent {
+		fmt.Printf("🔍 VulnSpectra - Advanced Taint Analysis Engine\n")
+		if scanMode != "Directory" {
+			fmt.Printf("   Mode: %s\n", scanMode)
+		}
+		fmt.Printf("   Scanning: %s\n", scanPath)
+		fmt.Printf("   Extensions: %s\n", *extensions)
+		fmt.Printf("   Min Confidence: %s\n", *minConfidence)
+		if *vulnCheck != "" {
+			fmt.Printf("   Vuln Filter: %s\n", *vulnCheck)
+		}
+		if *ignoreVulnCheck != "" {
+			fmt.Printf("   Ignore Vuln: %s\n", *ignoreVulnCheck)
+		}
+		fmt.Println()
+	}
 
 	// Walk directory
-	err := filepath.Walk(*filesystem, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(scanPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -748,8 +926,8 @@ func main() {
 	// Print results
 	analyzer.PrintResults()
 
-	// Save to file if requested
-	if *output != "" {
+	// Save to file if requested and there are findings
+	if *output != "" && len(analyzer.findings) > 0 {
 		if err := analyzer.SaveResultsToFile(*output); err != nil {
 			fmt.Printf("Error saving report: %v\n", err)
 		} else {
